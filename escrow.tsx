@@ -1,190 +1,145 @@
-import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useState } from 'react';
-import { useWriteContract, useAccount } from 'wagmi';
+import React, { useState, useEffect } from 'react';
+import { ethers } from 'ethers';
 
-const ESCROW_CONTRACT_ADDRESS = '0xcb7ee94cfe8c058115bd0350e524018d7fc4f1ee'; 
+// PASTE YOUR NEW CONTRACT ADDRESS COPIED FROM REMIX INSIDE THESE QUOTES:
+const ESCROW_CONTRACT_ADDRESS = "PASTE_YOUR_COPIED_REMIX_ADDRESS_HERE";
 
 const ESCROW_ABI = [
-  { "inputs": [], "name": "releaseFunds", "outputs": [], "stateMutability": "external", "type": "function" },
-  { "inputs": [], "name": "refundClient", "outputs": [], "stateMutability": "external", "type": "function" }
-] as const;
+  "function depositFunds() external payable",
+  "function submitProofOfWork(bytes32 _proofHash) external",
+  "function approveAndRelease(string memory _passcode) external",
+  "function refundClient() external",
+  "function currentState() external view returns (uint8)",
+  "function paymentAmount() external view returns (uint256)"
+];
 
-export default function EscrowPage() {
-  const { isConnected } = useAccount();
-  const { writeContractAsync } = useWriteContract();
-  
+export default function App() {
+  const [contract, setContract] = useState(null);
+  const [account, setAccount] = useState("");
+  const [passcode, setPasscode] = useState("");
+  const [statusMessage, setStatusMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [passcode, setPasscode] = useState('');
-  const [isVerified, setIsVerified] = useState(false);
 
-  const verifyZKProof = () => {
-    if (!passcode.trim()) {
-      setErrorMessage("Please enter a cryptographic passcode first.");
-      return;
-    }
-    setLoading(true);
-    setErrorMessage(null);
-    
-    setTimeout(() => {
-      setIsVerified(true);
-      setLoading(false);
-      setStatusMessage("✓ Zero-Knowledge Proof verified successfully. Contract actions unlocked.");
-    }, 1200);
-  };
+  useEffect(() => {
+    async function initBlockchain() {
+      if (window.ethereum) {
+        try {
+          const web3Provider = new ethers.BrowserProvider(window.ethereum);
+          const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+          const web3Signer = await web3Provider.getSigner();
+          const escrowContract = new ethers.Contract(ESCROW_CONTRACT_ADDRESS, ESCROW_ABI, web3Signer);
 
-  const handleAction = async (functionName: 'releaseFunds' | 'refundClient') => {
-    if (!isConnected) {
-      setErrorMessage("Connection Error: Please connect your Web3 wallet.");
-      return;
-    }
-    if (functionName === 'releaseFunds' && !isVerified) {
-      setErrorMessage("Security Block: You must verify your ZK Passcode before executing escrow settlement.");
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setErrorMessage(null);
-
-      // Check if the contract has money left before trying to run the transaction
-      const provider = (window as any).ethereum;
-      if (provider) {
-        const balanceHex = await provider.request({
-          method: 'eth_getBalance',
-          params: [ESCROW_CONTRACT_ADDRESS, 'latest'],
-        });
-        const balanceDecimal = parseInt(balanceHex, 16);
-
-        // If the contract balance is 0, show a clean message and stop!
-        if (balanceDecimal === 0) {
-          setErrorMessage("Notice: This escrow contract is currently empty (0 AVAX). Deployed funds have already been successfully settled or refunded.");
-          setLoading(false);
-          return;
+          setContract(escrowContract);
+          setAccount(accounts[0]);
+          setStatusMessage("Connected to MetaMask successfully.");
+        } catch (err) {
+          console.error(err);
+          setStatusMessage("Failed to connect MetaMask. Ensure you are on Fuji Testnet.");
         }
+      } else {
+        setStatusMessage("Please install MetaMask to use this app.");
       }
+    }
+    initBlockchain();
+  }, []);
 
-      setStatusMessage("Awaiting wallet signature... Please check MetaMask.");
-
-      const tx = await writeContractAsync({
-        address: ESCROW_CONTRACT_ADDRESS,
-        abi: ESCROW_ABI,
-        functionName: functionName,
+  async function handleDeposit() {
+    if (!contract) return;
+    setLoading(true);
+    setStatusMessage("Sending deposit transaction...");
+    try {
+      const tx = await contract.depositFunds({
+        value: ethers.parseEther("0.1") 
       });
-
-      setStatusMessage(`Transaction Dispatched! Hash: ${tx}`);
-    } catch (error: any) {
-      setErrorMessage(error.shortMessage || error.message || "Execution reverted.");
-      setStatusMessage(null);
+      setStatusMessage("Deposit processing on blockchain... please wait.");
+      await tx.wait(); 
+      setStatusMessage("Deposit successful! 0.1 AVAX added to contract.");
+    } catch (error) {
+      console.error(error);
+      setStatusMessage(`Deposit Failed: ${error.reason || error.message}`);
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  async function handleReleaseFunds() {
+    if (!contract) return;
+    if (!passcode) {
+      setStatusMessage("Please enter a valid passcode first.");
+      return;
+    }
+    setLoading(true);
+    setStatusMessage("Verifying proof and sending transaction...");
+    try {
+      const tx = await contract.approveAndRelease(passcode);
+      setStatusMessage("Transaction executing on-chain... please wait.");
+      const receipt = await tx.wait(); 
+      
+      if (receipt.status === 1) {
+        setStatusMessage("Success! Passcode verified and funds released smoothly.");
+      } else {
+        setStatusMessage("Transaction failed on-chain execution.");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatusMessage(`Transaction Reverted: ${error.reason || error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleRefund() {
+    if (!contract) return;
+    setLoading(true);
+    setStatusMessage("Requesting refund...");
+    try {
+      const tx = await contract.refundClient();
+      setStatusMessage("Processing refund... please wait.");
+      await tx.wait();
+      setStatusMessage("Refund processed successfully!");
+    } catch (error) {
+      console.error(error);
+      setStatusMessage(`Refund Failed: ${error.reason || error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
-    <div style={{ backgroundColor: '#080A0E', color: '#F0F3F8', minHeight: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', padding: '60px 20px', backgroundImage: 'radial-gradient(circle at top right, rgba(232, 65, 66, 0.08), transparent 400px)' }}>
-      <div style={{ maxWidth: '700px', margin: '0 auto' }}>
-        
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '50px', backgroundColor: '#11151D', padding: '16px 24px', borderRadius: '14px', border: '1px solid #1E2530' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ display: 'inline-block', width: '10px', height: '10px', backgroundColor: '#E84142', borderRadius: '50%', boxShadow: '0 0 10px #E84142' }}></span>
-              <h1 style={{ fontSize: '18px', fontWeight: '700', margin: 0, letterSpacing: '0.5px' }}>ZK-ESCROW LABS</h1>
-            </div>
-          </div>
-          <ConnectButton chainStatus="icon" showBalance={true} />
-        </header>
+    <div style={{ padding: "40px", fontFamily: "sans-serif", maxWidth: "600px", margin: "0 auto" }}>
+      <h1>ZK-Escrow Live Project Test Dashboard</h1>
+      <p><strong>Connected Account:</strong> {account || "Not Connected"}</p>
+      
+      <div style={{ background: "#f5f5f5", padding: "20px", borderRadius: "8px", margin: "20px 0" }}>
+        <h3>Step 1: Fund the Contract</h3>
+        <button onClick={handleDeposit} disabled={loading} style={{ padding: "10px 20px", cursor: "pointer" }}>
+          Deposit 0.1 AVAX
+        </button>
+      </div>
 
-        {!isConnected && (
-          <div style={{ backgroundColor: 'rgba(232, 65, 66, 0.1)', border: '1px solid rgba(232, 65, 66, 0.2)', padding: '14px', borderRadius: '12px', marginBottom: '24px', fontSize: '14px', color: '#E84142', textAlign: 'center' }}>
-            🔒 System locked. Connect your decentralized wallet to view active deployment status.
-          </div>
-        )}
+      <div style={{ background: "#f5f5f5", padding: "20px", borderRadius: "8px", margin: "20px 0" }}>
+        <h3>Step 2: Submit & Verify Passcode</h3>
+        <input 
+          type="text" 
+          placeholder="Enter Passcode" 
+          value={passcode} 
+          onChange={(e) => setPasscode(e.target.value)}
+          style={{ padding: "10px", width: "80%", marginBottom: "10px" }}
+        />
+        <br />
+        <button onClick={handleReleaseFunds} disabled={loading} style={{ padding: "10px 20px", cursor: "pointer", marginRight: "10px", background: "#4CAF50", color: "white", border: "none" }}>
+          Release Escrow Funds
+        </button>
+        <button onClick={handleRefund} disabled={loading} style={{ padding: "10px 20px", cursor: "pointer", background: "#f44336", color: "white", border: "none" }}>
+          Refund Client
+        </button>
+      </div>
 
-        <main style={{ backgroundColor: '#11151D', borderRadius: '24px', border: '1px solid #1E2530', padding: '40px', boxShadow: '0 20px 40px rgba(0, 0, 0, 0.4)' }}>
-          
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '30px' }}>
-            <div>
-              <h2 style={{ fontSize: '24px', fontWeight: '600', margin: '0 0 8px 0' }}>Escrow Node Dashboard</h2>
-              <p style={{ color: '#7E8BA2', fontSize: '14px', margin: 0, lineHeight: '1.6' }}>
-                Automated peer-to-peer settlement portal deployed over Avalanche infrastructure. Verified computations run cryptographically.
-              </p>
-            </div>
-            <span style={{ fontSize: '11px', fontWeight: '700', backgroundColor: '#1E2530', padding: '6px 12px', borderRadius: '20px', color: '#E84142', border: '1px solid #2C3747' }}>AVALANCHE FUJI</span>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#181E29', padding: '14px 20px', borderRadius: '12px', border: '1px solid #222B3A', marginBottom: '35px' }}>
-            <span style={{ fontSize: '12px', color: '#7E8BA2', fontWeight: '500' }}>Target Anchor Address</span>
-            <a href={`https://testnet.snowscan.xyz/address/${ESCROW_CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer" style={{ fontSize: '13px', fontFamily: 'monospace', color: '#E84142', textDecoration: 'none', borderBottom: '1px dashed #E84142' }}>
-              {ESCROW_CONTRACT_ADDRESS.slice(0,8)}...{ESCROW_CONTRACT_ADDRESS.slice(-8)} ↗
-            </a>
-          </div>
-
-          <div style={{ display: 'flex', gridGap: '30px', flexDirection: 'column', borderTop: '1px solid #1E2530', paddingTop: '30px' }}>
-            
-            <div style={{ backgroundColor: '#181E29', padding: '24px', borderRadius: '16px', border: '1px solid #222B3A' }}>
-              <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '10px', color: '#7E8BA2' }}>
-                1. Cryptographic Zero-Knowledge Secret Validation
-              </label>
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <input 
-                  type="password" 
-                  disabled={isVerified || loading}
-                  placeholder={isVerified ? "✓ Identity Lock Verified" : "Input private pre-image verification code..."} 
-                  value={passcode}
-                  onChange={(e) => setPasscode(e.target.value)}
-                  style={{ flex: 1, padding: '14px', backgroundColor: '#080A0E', border: isVerified ? '1px solid #00C851' : '1px solid #2C3747', borderRadius: '10px', color: '#F0F3F8', fontSize: '14px', outline: 'none' }}
-                />
-                <button 
-                  onClick={verifyZKProof}
-                  disabled={isVerified || loading}
-                  style={{ backgroundColor: isVerified ? '#00C851' : '#E84142', color: '#FFFFFF', padding: '0 24px', borderRadius: '10px', border: 'none', fontWeight: '600', cursor: isVerified ? 'default' : 'pointer', fontSize: '14px', transition: 'all 0.2s' }}
-                >
-                  {isVerified ? 'Verified' : 'Verify Proof'}
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <span style={{ display: 'block', fontSize: '13px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '14px', color: '#7E8BA2' }}>
-                2. Distributed Ledger Action Settlements
-              </span>
-              <div style={{ display: 'flex', gap: '16px' }}>
-                <button 
-                  disabled={loading}
-                  onClick={() => handleAction('releaseFunds')}
-                  style={{ flex: 1, padding: '16px', backgroundColor: isVerified ? '#E84142' : '#1E2530', color: isVerified ? '#FFFFFF' : '#4E5A70', border: 'none', borderRadius: '12px', cursor: isVerified ? 'pointer' : 'not-allowed', fontWeight: '700', fontSize: '15px', boxShadow: isVerified ? '0 4px 15px rgba(232, 65, 66, 0.2)' : 'none' }}
-                >
-                  {loading ? 'Executing Engine...' : 'Release Escrow Funds'}
-                </button>
-
-                <button 
-                  disabled={loading}
-                  onClick={() => handleAction('refundClient')}
-                  style={{ flex: 1, padding: '16px', backgroundColor: 'transparent', color: '#E84142', border: '2px solid #E84142', borderRadius: '12px', cursor: 'pointer', fontWeight: '700', fontSize: '15px' }}
-                >
-                  Request Safety Refund
-                </button>
-              </div>
-            </div>
-
-          </div>
-
-          {statusMessage && (
-            <div style={{ marginTop: '30px', padding: '16px', backgroundColor: 'rgba(0, 200, 81, 0.06)', border: '1px solid rgba(0, 200, 81, 0.3)', borderRadius: '12px', color: '#00C851', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{ width: '6px', height: '6px', backgroundColor: '#00C851', borderRadius: '50%' }}></span>
-              {statusMessage}
-            </div>
-          )}
-          
-          {errorMessage && (
-            <div style={{ marginTop: '30px', padding: '16px', backgroundColor: 'rgba(232, 65, 66, 0.06)', border: '1px solid rgba(232, 65, 66, 0.3)', borderRadius: '12px', color: '#E84142', fontSize: '14px' }}>
-              ⚠️ {errorMessage}
-            </div>
-          )}
-
-        </main>
+      <div style={{ marginTop: "20px", padding: "15px", background: "#eef7ff", borderRadius: "5px", borderLeft: "5px solid #2196F3" }}>
+        <strong>System Logs / Error Output:</strong>
+        <p style={{ margin: "5px 0 0 0", color: statusMessage.includes("Failed") || statusMessage.includes("Reverted") ? "red" : "black" }}>
+          {statusMessage}
+        </p>
       </div>
     </div>
   );
