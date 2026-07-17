@@ -2,76 +2,76 @@
 pragma solidity ^0.8.20;
 
 contract ZKEscrow {
-    // State Variables
     address public client;
     address public freelancer;
     uint256 public paymentAmount;
-    bytes32 public workHash; // Stores the cryptographic proof of work
-    
-    enum EscrowState { AWAITING_WORK, WORK_SUBMITTED, COMPLETED, REFUNDED }
+    bytes32 public zkProofHash; 
+
+    enum EscrowState { AWAITING_WORK, WORK_SUBMITTED, RELEASED, REFUNDED }
     EscrowState public currentState;
 
-    // Events (Crucial for frontend tracking)
-    event WorkSubmitted(bytes32 indexed cryptographicHash);
+    event FundsDeposited(address indexed client, uint256 amount);
+    event WorkSubmitted(bytes32 proofHash);
     event FundsReleased(address indexed freelancer, uint256 amount);
     event FundsRefunded(address indexed client, uint256 amount);
 
-    // Modifiers to restrict access securely
     modifier onlyClient() {
-        require(msg.sender == client, "Only the client can perform this action");
-        _;
-    }
-
-    modifier onlyFreelancer() {
-        require(msg.sender == freelancer, "Only the freelancer can perform this action");
+        require(msg.sender == client, "Only client can call this");
         _;
     }
 
     modifier inState(EscrowState _state) {
-        require(currentState == _state, "Invalid state for this action");
+        require(currentState == _state, "Invalid contract state");
         _;
     }
 
-    /// @notice Initialize contract with freelancer address and deposit funds
-    /// @param _freelancer The wallet address of the developer
-    constructor(address _freelancer) payable {
-        require(msg.value > 0, "You must fund the escrow with AVAX");
-        require(_freelancer != address(0), "Invalid freelancer address");
-        
+    constructor(address _freelancer) {
         client = msg.sender;
         freelancer = _freelancer;
-        paymentAmount = msg.value;
         currentState = EscrowState.AWAITING_WORK;
     }
 
-    /// @notice Freelancer submits the cryptographic proof of work without leaking the files
-    /// @param _workHash The SHA-256 or Keccak256 hash of the finished project files
-    function submitProofOfWork(bytes32 _workHash) external onlyFreelancer inState(EscrowState.AWAITING_WORK) {
-        require(_workHash != bytes32(0), "Hash cannot be empty");
-        workHash = _workHash;
+    function depositFunds() external payable {
+        require(msg.value > 0, "Must deposit more than 0 AVAX");
+        paymentAmount += msg.value;
+        emit FundsDeposited(msg.sender, msg.value);
+    }
+
+    function submitProofOfWork(bytes32 _proofHash) external {
+        zkProofHash = _proofHash;
         currentState = EscrowState.WORK_SUBMITTED;
-        
-        emit WorkSubmitted(_workHash);
+        emit WorkSubmitted(_proofHash);
     }
 
-    /// @notice Client approves the proof and releases funds directly to the freelancer
-    function approveAndRelease() external onlyClient inState(EscrowState.WORK_SUBMITTED) {
-        currentState = EscrowState.COMPLETED;
+    function approveAndRelease(string memory _passcode) external onlyClient inState(EscrowState.WORK_SUBMITTED) {
+        require(keccak256(abi.encodePacked(_passcode)) == zkProofHash, "Invalid ZK passcode proof");
         
-        // Secure low-level transfer pattern
-        (bool success, ) = payable(freelancer).call{value: paymentAmount}("");
-        require(success, "AVAX Transfer to freelancer failed");
+        uint256 amount = paymentAmount;
+        require(amount > 0, "No funds to release");
+        
+        paymentAmount = 0;
+        currentState = EscrowState.RELEASED;
 
-        emit FundsReleased(freelancer, paymentAmount);
+        (bool success, ) = payable(freelancer).call{value: amount}("");
+        require(success, "Transfer to freelancer failed");
+
+        emit FundsReleased(freelancer, amount);
     }
 
-    /// @notice Emergency refund if freelancer fails to submit proof
-    function refundClient() external onlyClient inState(EscrowState.AWAITING_WORK) {
+    function refundClient() external onlyClient {
+        uint256 amount = paymentAmount;
+        require(amount > 0, "No funds to refund");
+
+        paymentAmount = 0;
         currentState = EscrowState.REFUNDED;
-        
-        (bool success, ) = payable(client).call{value: paymentAmount}("");
+
+        (bool success, ) = payable(client).call{value: amount}("");
         require(success, "Refund failed");
 
-        emit FundsRefunded(client, paymentAmount);
+        emit FundsRefunded(client, amount);
+    }
+
+    receive() external payable {
+        paymentAmount += msg.value;
     }
 }
